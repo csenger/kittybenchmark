@@ -175,7 +175,8 @@ class KittyMGStore(KittyStore):
         return list(mongodb.mails.find(query_string, sort=[('Date',
             pymongo.DESCENDING)]))
 
-    def search_content_subject(self, list_name, keyword):
+    def search_content_subject(self, list_name, keyword, limit=None,
+                               offset=None):
         """ Returns a list of email containing the specified keyword in
         their content or their subject.
 
@@ -196,8 +197,13 @@ class KittyMGStore(KittyStore):
             {'Content': re.compile(regex, re.IGNORECASE)},
             {'Subject': re.compile(regex, re.IGNORECASE)}
             ]}
-        return list(mongodb.mails.find(query_string, sort=[('Date',
-            pymongo.DESCENDING)]))
+        cursor = mongodb.mails.find(query_string,
+                                    sort=[('Date',
+                                           pymongo.DESCENDING)])
+        if limit is not None:
+            cursor = cursor.skip(offset).limit(limit)
+
+        return list(cursor)
 
     def search_content_subject_cs(self, list_name, keyword):
         """ Returns a list of email containing the specified keyword in

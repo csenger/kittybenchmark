@@ -4,7 +4,7 @@ files <- c('get_thread_length', 'get_email', 'first_email_in_archives_range',
     'get_archives_range', 'get_list_size',
     'search_subject', 'search_content', 'search_content_subject', 'search_sender',
     'search_subject_cs', 'search_content_cs', 'search_content_subject_cs',
-    'search_sender_cs')
+    'search_sender_cs', 'search_content_subject_300_30', 'search_content_subject_5000_30')
 
 # We want to have an overview of how well the two databases systems are
 # doing compare to each other.
@@ -12,7 +12,7 @@ files <- c('get_thread_length', 'get_email', 'first_email_in_archives_range',
 # vs using a or statement.
 
 png('overview.png', width = 1500, height = 1500, units = "px", pointsize = 20,)
-par(mfrow = c(4, 4), pty = "s")
+par(mfrow = c(5, 4), pty = "s")
 for (filename in files){
     tmp <- read.table(file=filename, sep='\t', header=T)
     boxplot(tmp, main=filename, ylab='Time in s',
@@ -45,7 +45,7 @@ png('mg_sensitivity.png', width = 700, height = 700, units = "px", pointsize = 1
 par(mfrow = c(2, 2), pty = "s")
 i <- 1
 while (i < length(files)){
-#    print(i)
+#    print(files[i])
     tmp <- read.table(file=files[i], sep='\t', header=T)
     tmp2 <- read.table(file=files[i + 1], sep='\t', header=T)
     tmp <- cbind(tmp[,"MG"], tmp2[,"MG"])

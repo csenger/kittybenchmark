@@ -16,15 +16,41 @@ license.
 """
 
 import datetime
+import time
 
 from kittystore import KittyStore
 from kittystore.kittysamodel import get_class_object
 
 
 from sqlalchemy import create_engine, distinct, MetaData, and_, desc, or_
+from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.orm.exc import NoResultFound
+from sqlalchemy import event
+from sqlalchemy.engine import Engine
+
+import logging
+
+logging.basicConfig()
+logger = logging.getLogger("Postgres")
+logger.setLevel(logging.DEBUG)
+
+
+#@event.listens_for(Engine, "before_cursor_execute")
+def before_cursor_execute(conn, cursor, statement,
+                        parameters, context, executemany):
+    context._query_start_time = time.time()
+    logger.debug("Start Query:\n%s" % statement)
+    logger.debug("Parameters:\n%r" % (parameters,))
+
+
+#@event.listens_for(Engine, "after_cursor_execute")
+def after_cursor_execute(conn, cursor, statement,
+                        parameters, context, executemany):
+    total = time.time() - context._query_start_time
+    logger.debug("Query Complete!")
+    logger.debug("Total Time: %.02fms" % (total * 1000))
 
 
 def list_to_table_name(list_name):
@@ -63,9 +89,44 @@ class KittySAStore(KittyStore):
         session = sessionmaker(bind=self.engine)
         self.session = session()
 
+    def add_fulltext_indexes(self, list_name):
+        '''
+        Create a full text index for a list table
+        '''
+
+        table_name = list_to_table_name(list_name)
+
+        def execute(sql):
+            '''
+            print, execute, log error if any and pass.
+            '''
+            print '-' * 60
+            print 'Statement: ', sql[:60]
+            try:
+                self.engine.execute(sql)
+            except ProgrammingError, exception:
+                if exception.orig.pgcode in ['42710', '42P07']:
+                    print 'exists.'
+                else:
+                    print 'failed: %s\nstatement:%s' % (exception.orig.pgerror,
+                                                        sql)
+            else:
+                print 'done.'
+
+        for columns in [['content'], ['subject'], ['content', 'subject']]:
+            index_name = "%s_fulltext_index" % ('_'.join(columns))
+
+            # Add indexes for different queries
+            execute(('CREATE INDEX "%s" ON "%s" USING '
+                     "gin(to_tsvector('english', %s))") %
+                     (index_name, table_name, " || ' ' || ".join(columns)))
+
+            ## Alternatively: a column based solution outlined in
+            ## http://www.postgresql.org/docs/9.1/interactive/textsearch-tables.html#TEXTSEARCH-TABLES-INDEX
+
     def get_archives(self, list_name, start, end):
         """ Return all the thread started emails between two given dates.
-        
+
         :arg list_name, name of the mailing list in which this email
         should be searched.
         :arg start, a datetime object representing the starting date of
@@ -216,7 +277,35 @@ class KittySAStore(KittyStore):
         mails.reverse()
         return mails
 
-    def search_content_subject(self, list_name, keyword):
+    def search_content_index(self, list_name, keyword, limit=None,
+                             offset=None):
+        email = get_class_object(list_to_table_name(list_name), 'email',
+                                 self.metadata)
+        criterion = "to_tsvector('english', content) @@ to_tsquery(:keyword)"
+        keyword = '%s:*' % keyword
+        q = self.session.query(email).order_by(email.date)
+        q = q.filter(criterion).params(keyword=keyword)
+        if limit is not None:
+            # imply that the result set is that big
+            q = q.offset(None).limit(limit)
+        all = q.all()
+        return all
+
+    def search_subject_index(self, list_name, keyword, limit=None, offset=300):
+        email = get_class_object(list_to_table_name(list_name), 'email',
+                                 self.metadata)
+        criterion = "to_tsvector('english', subject) @@ to_tsquery(:keyword)"
+        keyword = '%s:*' % keyword
+
+        q = self.session.query(email)
+        q = q.filter(criterion).params(keyword=keyword).order_by(email.date)
+        if limit is not None:
+            # imply that the result set is that big
+            q = q.offset(offset).limit(limit)
+        return q.all()
+
+    def search_content_subject(self, list_name, keyword, limit=None,
+                               offset=None):
         """ Returns a list of email containing the specified keyword in
         their content or their subject.
 
@@ -225,6 +314,9 @@ class KittySAStore(KittyStore):
         :arg keyword, keyword to search in the content or subject of
         the emails.
         """
+        if limit is not None:
+            # not implemented, skip the result
+            raise NotImplementedError
         email = get_class_object(list_to_table_name(list_name), 'email',
             self.metadata)
         mails = self.session.query(email).filter(
@@ -236,6 +328,54 @@ class KittySAStore(KittyStore):
         mails.reverse()
         #return list(set(mails))
         return mails
+
+    def search_content_subject_index(self, list_name, keyword, limit=None,
+                                     offset=None):
+        """ Returns a list of email containing the specified keyword in
+        their content or their subject.
+
+        :arg list_name, name of the mailing list in which this email
+        should be searched.
+        :arg keyword, keyword to search in the content or subject of
+        the emails.
+        """
+        criterion = ("to_tsvector('english', (content || ' ') || subject) "
+                     "@@ to_tsquery(:keyword)")
+        keyword = '%s:*' % keyword
+        email = get_class_object(list_to_table_name(list_name), 'email',
+                                 self.metadata)
+        q = self.session.query(email)
+        q = q.filter(criterion).params(keyword=keyword)
+        # q = q.order_by(email.date)
+        if limit is not None:
+            # imply that the result set is that big
+            q = q.offset(offset).limit(limit)
+        return q.all()
+
+    def search_content_subject_index_or(self, list_name, keyword, limit=None,
+                                        offset=None):
+        """ Returns a list of email containing the specified keyword in
+        their content or their subject.
+
+        :arg list_name, name of the mailing list in which this email
+        should be searched.
+        :arg keyword, keyword to search in the content or subject of
+        the emails.
+        """
+        criterion_subject = ("to_tsvector('english', subject) "
+                             "@@ to_tsquery(:keyword)")
+        criterion_content = ("to_tsvector('english', content) "
+                             "@@ to_tsquery(:keyword)")
+        keyword = '%s:*' % keyword
+        email = get_class_object(list_to_table_name(list_name), 'email',
+                                 self.metadata)
+        q = self.session.query(email).filter(
+            or_(criterion_subject,
+                criterion_content)).params(keyword=keyword)
+        if limit is not None:
+            # imply that the result set is that big
+            q = q.offset(offset).limit(limit)
+        return q.all()
 
     def search_content_subject_cs(self, list_name, keyword):
         """ Returns a list of email containing the specified keyword in
@@ -258,7 +398,8 @@ class KittySAStore(KittyStore):
         #return list(set(mails))
         return mails
 
-    def search_content_subject_or(self, list_name, keyword):
+    def search_content_subject_or(self, list_name, keyword, limit=None,
+                                  offset=None):
         """ Returns a list of email containing the specified keyword in
         their content or their subject.
 
@@ -272,11 +413,18 @@ class KittySAStore(KittyStore):
         mails = self.session.query(email).filter(or_(
                 email.content.ilike('%{0}%'.format(keyword)),
                 email.subject.ilike('%{0}%'.format(keyword))
-                )).order_by(email.date).all()
+                )).order_by(email.date)
+
+        if limit is not None:
+            # imply that the result set is that big
+            mails = mails.offset(offset).limit(limit)
+
+        mails = mails.all()
         mails.reverse()
         return list(set(mails))
 
-    def search_content_subject_or_cs(self, list_name, keyword):
+    def search_content_subject_or_cs(self, list_name, keyword, limit=None,
+                                     offset=None):
         """ Returns a list of email containing the specified keyword in
         their content or their subject.
 
@@ -290,7 +438,14 @@ class KittySAStore(KittyStore):
         mails = self.session.query(email).filter(or_(
                 email.content.like('%{0}%'.format(keyword)),
                 email.subject.like('%{0}%'.format(keyword))
-                )).order_by(email.date).all()
+                )).order_by(email.date)
+
+        if limit is not None:
+            # imply that the result set is that big
+            mails = mails.offset(offset).limit(limit)
+
+        mails = mails.all()
+
         mails.reverse()
         return list(set(mails))
 
